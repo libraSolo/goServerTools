@@ -29,7 +29,7 @@ func newSubscribing() *subscribing {
 // - 每个订阅者使用唯一的 Handler 接收消息
 type GenericPubSub struct {
     mu   sync.RWMutex
-    tree trietst.TrieMO
+    tree trietst.Trie
 
     // 记录订阅者的已订阅主题（便于取消订阅 / 取消所有）
     subscriberExactSubjects    map[string]common.StringSet
@@ -167,7 +167,7 @@ func (ps *GenericPubSub) Publish(subject string, content string) {
 }
 
 // 递归沿前缀树匹配并调用订阅者
-func (ps *GenericPubSub) publishInTree(subject string, content string, st *trietst.TrieMO, idx int) {
+func (ps *GenericPubSub) publishInTree(subject string, content string, st *trietst.Trie, idx int) {
     subs := ps.getSubscribingOfTree(st, false)
     if subs != nil {
         // 调用当前层的通配订阅者（prefix+'*')
@@ -198,7 +198,7 @@ func (ps *GenericPubSub) getSubscribing(subject string, newIfNotExists bool) *su
 }
 
 // 从树节点取订阅集合
-func (ps *GenericPubSub) getSubscribingOfTree(t *trietst.TrieMO, newIfNotExists bool) *subscribing {
+func (ps *GenericPubSub) getSubscribingOfTree(t *trietst.Trie, newIfNotExists bool) *subscribing {
     var subs *subscribing
     if t.Val == nil {
         if newIfNotExists {

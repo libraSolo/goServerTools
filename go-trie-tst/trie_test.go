@@ -5,7 +5,7 @@ import "testing"
 // TestSubCreatesPathAndStoresVal：验证 Sub 会创建路径，
 // 并允许通过返回的节点存取值。
 func TestSubCreatesPathAndStoresVal(t *testing.T) {
-    var root TrieMO
+    var root Trie
     node := root.Sub("foo")
     if node == nil {
         t.Fatalf("Sub returned nil")
@@ -24,7 +24,7 @@ func TestSubCreatesPathAndStoresVal(t *testing.T) {
 // TestChildReturnsSameNode：确保对同一字节 Child 返回同一节点，
 // 不同字节返回不同节点。
 func TestChildReturnsSameNode(t *testing.T) {
-    var root TrieMO
+    var root Trie
     a1 := root.Child('a')
     a2 := root.Child('a')
     if a1 != a2 {
@@ -38,7 +38,7 @@ func TestChildReturnsSameNode(t *testing.T) {
 
 // TestSubEmptyReturnsRoot：检查 Sub("") 返回根节点。
 func TestSubEmptyReturnsRoot(t *testing.T) {
-    var root TrieMO
+    var root Trie
     n := root.Sub("")
     if n != &root {
         t.Fatalf("Sub(\"\") should return the root node")
@@ -47,7 +47,7 @@ func TestSubEmptyReturnsRoot(t *testing.T) {
 
 // TestDeepPath：验证深路径创建正确且彼此独立。
 func TestDeepPath(t *testing.T) {
-    var root TrieMO
+    var root Trie
     abc := root.Sub("abc")
     abd := root.Sub("abd")
     if abc == nil || abd == nil {
@@ -67,7 +67,7 @@ func TestDeepPath(t *testing.T) {
 
 // TestSeparateValues：确保不同路径上的值不会互相覆盖。
 func TestSeparateValues(t *testing.T) {
-    var root TrieMO
+    var root Trie
     root.Sub("ab").Val = "v1"
     root.Sub("ac").Val = "v2"
 
