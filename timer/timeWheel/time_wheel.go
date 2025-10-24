@@ -4,201 +4,308 @@ import (
 	"container/list"
 	"errors"
 	"log"
-	"math"
 	"sync"
 	"time"
 )
 
-// TimeWheel 结构定义
+// TimeWheel 多层时间轮结构定义
 type TimeWheel struct {
-	interval          time.Duration
-	ticker            *time.Ticker
-	slots             []*list.List
-	timer             map[interface{}]*list.Element
-	currentPos        int
-	slotNum           int
-	addTaskChannel    chan Task
-	removeTaskChannel chan interface{}
-	stopChannel       chan bool
-	taskMutex         sync.Mutex
-	nextLevel         *TimeWheel // 指向下一层（更快）的时间轮
-	level             int        // 当前时间轮的层级（慢->快：level -> 1）
+	interval    time.Duration               // 当前时间轮的刻度间隔
+	slots       []*list.List                // 时间轮槽位
+	timer       map[interface{}]*timerEntry // 任务索引映射（仅最底层使用）
+	currentPos  int                         // 当前指针位置
+	slotNum     int                         // 槽位总数
+	taskMutex   sync.RWMutex                // 读写锁（仅最底层使用）
+	higherLevel *TimeWheel                  // 指向上层时间轮（更慢）
+	lowerLevel  *TimeWheel                  // 指向下层时间wheel（更快）
+	level       int                         // 当前层级（1为最底层）
+	root        *TimeWheel                  // 指向最底层时间轮的指针
+
+	// 以下字段仅在 root 时间轮中有效
+	stopChannel chan struct{}
+	running     bool
+	maxLevels   int
 }
 
-// Task 结构定义
+// 定时器条目
+type timerEntry struct {
+	task      *Task
+	slotIndex int
+	element   *list.Element
+}
+
+// 任务结构
 type Task struct {
-	delay  time.Duration
-	circle int
-	key    interface{}
-	job    func()
+	delay  time.Duration // 任务延迟时间
+	key    interface{}   // 任务唯一标识
+	job    func()        // 任务执行函数
+	circle int           // 任务需要在当前轮转多少圈
+	level  int           // 任务所在的层级
 }
 
-// New 创建一个新的层级时间轮。interval 是最快轮的刻度时间。
-func New(interval time.Duration, slotNum int, level int) (*TimeWheel, error) {
-	if interval <= 0 || slotNum <= 0 || level <= 0 {
-		return nil, errors.New("interval, slotNum, or level must be greater than zero")
+// New 创建时间轮实例
+// interval: 最底层时间轮的刻度间隔
+// slotNum: 每层的槽位数
+// maxLevels: 允许的最大层级数
+func New(interval time.Duration, slotNum int, maxLevels int) (*TimeWheel, error) {
+	if interval <= 0 || slotNum <= 0 || maxLevels <= 0 {
+		return nil, errors.New("interval, slotNum, and maxLevels must be greater than zero")
 	}
 
-	wheels := make([]*TimeWheel, level)
-	// 从最快到最慢创建所有轮
-	for i := 0; i < level; i++ {
-		currentInterval := interval * time.Duration(math.Pow(float64(slotNum), float64(i)))
-		wheels[i] = newTimeWheel(currentInterval, slotNum, level-i)
+	// 只创建最底层时间轮
+	root := &TimeWheel{
+		interval:    interval,
+		slots:       make([]*list.List, slotNum),
+		timer:       make(map[interface{}]*timerEntry),
+		currentPos:  0,
+		slotNum:     slotNum,
+		stopChannel: make(chan struct{}),
+		level:       1,
+		maxLevels:   maxLevels,
 	}
+	root.root = root // 指向自己
 
-	// 从最慢到最快连接它们
-	for i := level - 1; i > 0; i-- {
-		wheels[i].nextLevel = wheels[i-1]
-	}
-
-	// 返回最慢的轮作为根
-	return wheels[level-1], nil
-}
-
-func newTimeWheel(interval time.Duration, slotNum int, level int) *TimeWheel {
-	tw := &TimeWheel{
-		interval:          interval,
-		slots:             make([]*list.List, slotNum),
-		timer:             make(map[interface{}]*list.Element),
-		currentPos:        0,
-		slotNum:           slotNum,
-		addTaskChannel:    make(chan Task, 1024),
-		removeTaskChannel: make(chan interface{}),
-		stopChannel:       make(chan bool),
-		level:             level,
-	}
 	for i := 0; i < slotNum; i++ {
-		tw.slots[i] = list.New()
+		root.slots[i] = list.New()
 	}
-	return tw
+
+	return root, nil
 }
 
+// Start 启动时间轮（只启动最底层）
 func (tw *TimeWheel) Start() {
-	// 启动所有层级的轮
-	current := tw
-	for current != nil {
-		current.ticker = time.NewTicker(current.interval)
-		go current.start()
-		current = current.nextLevel
+	tw.root.taskMutex.Lock()
+	if tw.root.running {
+		tw.root.taskMutex.Unlock()
+		return
 	}
+	tw.root.running = true
+	ticker := time.NewTicker(tw.root.interval)
+	go tw.root.run(ticker)
+	tw.root.taskMutex.Unlock()
+	log.Printf("时间轮启动，底层间隔: %v", tw.root.interval)
 }
 
+// Stop 停止时间轮
 func (tw *TimeWheel) Stop() {
-	current := tw
-	for current != nil {
-		current.stopChannel <- true
-		current = current.nextLevel
-	}
-}
-
-func (tw *TimeWheel) AddTask(delay time.Duration, key interface{}, job func()) {
-	if delay < 0 {
+	tw.root.taskMutex.Lock()
+	if !tw.root.running {
+		tw.root.taskMutex.Unlock()
 		return
 	}
-	tw.addTaskChannel <- Task{delay: delay, key: key, job: job}
+	tw.root.running = false
+	tw.root.taskMutex.Unlock()
+
+	close(tw.root.stopChannel)
+	log.Println("时间轮已停止")
 }
 
-func (tw *TimeWheel) RemoveTask(key interface{}) {
-	if key == nil {
-		return
-	}
-	tw.removeTaskChannel <- key
-}
-
-func (tw *TimeWheel) start() {
+// run 仅在最底层时间轮运行
+func (tw *TimeWheel) run(ticker *time.Ticker) {
+	defer ticker.Stop()
 	for {
 		select {
-		case <-tw.ticker.C:
+		case <-ticker.C:
 			tw.tickHandler()
-		case task := <-tw.addTaskChannel:
-			tw.addTask(&task)
-		case key := <-tw.removeTaskChannel:
-			tw.removeTask(key)
 		case <-tw.stopChannel:
-			tw.ticker.Stop()
 			return
 		}
 	}
 }
 
+// tickHandler 时间刻度处理（仅最底层调用）
 func (tw *TimeWheel) tickHandler() {
+	tw.root.taskMutex.Lock()
 	tw.currentPos = (tw.currentPos + 1) % tw.slotNum
-	l := tw.slots[tw.currentPos]
-	tw.scanAndRunTask(l)
+	slot := tw.slots[tw.currentPos]
+	tw.root.taskMutex.Unlock()
+
+	// 执行当前槽位的任务
+	tw.executeSlotTasks(slot)
+
+	// 如果是第0个槽，说明转完一圈，需要向上层传递tick
+	if tw.currentPos == 0 && tw.higherLevel != nil {
+		tw.higherLevel.advance()
+	}
 }
 
-func (tw *TimeWheel) scanAndRunTask(l *list.List) {
-	for e := l.Front(); e != nil; {
+// advance 手动推进上层时间轮
+func (tw *TimeWheel) advance() {
+	tw.root.taskMutex.Lock()
+	tw.currentPos = (tw.currentPos + 1) % tw.slotNum
+	slot := tw.slots[tw.currentPos]
+	tw.root.taskMutex.Unlock()
+
+	// 降级当前槽位的任务
+	tw.demoteSlotTasks(slot)
+
+	// 如果上层也转完一圈，继续向上传递
+	if tw.currentPos == 0 && tw.higherLevel != nil {
+		tw.higherLevel.advance()
+	}
+}
+
+// executeSlotTasks 执行最底层槽位的任务
+func (tw *TimeWheel) executeSlotTasks(slot *list.List) {
+	tw.root.taskMutex.Lock()
+	defer tw.root.taskMutex.Unlock()
+
+	for e := slot.Front(); e != nil; {
 		task := e.Value.(*Task)
+		next := e.Next()
+
 		if task.circle > 0 {
 			task.circle--
-			e = e.Next()
+			e = next
 			continue
 		}
 
-		next := e.Next()
-		l.Remove(e)
+		// 在锁内执行任务以保证状态一致性
+		go task.job()
+		log.Printf("任务执行: key=%v", task.key)
 
-		if tw.nextLevel != nil {
-			// 重新计算延迟并交给更快的轮处理
-			task.delay = task.delay % tw.interval
-			tw.nextLevel.addTask(task)
-		} else {
-			// 最快的轮，直接执行
-			go task.job()
-			tw.taskMutex.Lock()
-			delete(tw.timer, task.key)
-			tw.taskMutex.Unlock()
-		}
+		slot.Remove(e)
+		delete(tw.root.timer, task.key)
 		e = next
 	}
 }
 
-func (tw *TimeWheel) addTask(task *Task) {
-	delay := task.delay
+// demoteSlotTasks 降级上层槽位的任务
+func (tw *TimeWheel) demoteSlotTasks(slot *list.List) {
+	tw.root.taskMutex.Lock()
+	defer tw.root.taskMutex.Unlock()
 
-	if tw.nextLevel != nil && delay < tw.interval {
-		tw.nextLevel.addTask(task)
-		return
-	}
+	for e := slot.Front(); e != nil; {
+		task := e.Value.(*Task)
+		next := e.Next()
 
-	pos, circle := tw.getPositionAndCircle(delay)
-	task.circle = circle
-
-	elem := tw.slots[pos].PushBack(task)
-	tw.taskMutex.Lock()
-	tw.timer[task.key] = elem
-	tw.taskMutex.Unlock()
-	log.Printf("add task key: %v, pos: %d, circle: %d, level: %d", task.key, pos, circle, tw.level)
-}
-
-func (tw *TimeWheel) removeTask(key interface{}) {
-	tw.taskMutex.Lock()
-	defer tw.taskMutex.Unlock()
-
-	if elem, ok := tw.timer[key]; ok {
-		// 由于无法从 list.Element 直接找到其所属的 list，
-		// 我们需要遍历所有 slots 来找到并删除它。
-		// 这是一个性能瓶颈，但在 container/list 中难以避免。
-		// 更好的实现可能需要自定义链表。
-		for _, l := range tw.slots {
-			// 尝试从每个 list 中删除，只有一个会成功
-			l.Remove(elem)
+		if task.circle > 0 {
+			task.circle--
+			e = next
+			continue
 		}
-		delete(tw.timer, key)
-		log.Printf("removed task key: %v from level %d", key, tw.level)
-	} else if tw.nextLevel != nil {
-		// 如果当前轮没有，去更快的轮寻找
-		tw.nextLevel.removeTask(key)
+
+		// 任务到期，需要降级
+		// 计算剩余延迟并重新添加到根轮
+		remainingDelay := task.delay % (tw.interval)
+		tw.root.AddTask(remainingDelay, task.key, task.job)
+
+		log.Printf("任务降级: key=%v 从层级 %d 到下层", task.key, tw.level)
+
+		slot.Remove(e)
+		delete(tw.root.timer, task.key)
+		e = next
 	}
 }
 
-func (tw *TimeWheel) getPositionAndCircle(d time.Duration) (pos int, circle int) {
-	if d < 0 {
-		d = 0
+// AddTask 添加一个新任务
+func (tw *TimeWheel) AddTask(delay time.Duration, key interface{}, job func()) error {
+	if delay < 0 {
+		return errors.New("delay must be non-negative")
 	}
-	ticks := int64(d / tw.interval)
-	circle = int(ticks / int64(tw.slotNum))
-	pos = int((int64(tw.currentPos) + ticks) % int64(tw.slotNum))
-	return
+
+	task := &Task{delay: delay, key: key, job: job}
+
+	// 必须在根节点的锁下执行，因为可能创建新层级
+	tw.root.taskMutex.Lock()
+	defer tw.root.taskMutex.Unlock()
+
+	// 先删除旧任务（如果存在）
+	tw.root.removeTaskInternal(key)
+
+	return tw.root.addTask(task)
+}
+
+// addTask 负责找到合适的轮并添加任务（必须在锁内调用）
+func (tw *TimeWheel) addTask(task *Task) error {
+	current := tw // 从根开始
+
+	// 寻找合适的层级，如果层级不够则创建
+	for task.delay >= current.interval*time.duration(current.slotNum) {
+		if current.higherLevel == nil {
+			if current.level >= current.root.maxLevels {
+				log.Printf("任务延迟 %v 过大，已超出最大层级 %d 的范围", task.delay, current.root.maxLevels)
+				// 可以选择报错或将其放入最高层
+				break
+			}
+			log.Printf("创建新层级: %d", current.level+1)
+			newHigherLevel := &TimeWheel{
+				interval:   current.interval * time.Duration(current.slotNum),
+				slots:      make([]*list.List, current.slotNum),
+				currentPos: 0,
+				slotNum:    current.slotNum,
+				level:      current.level + 1,
+				lowerLevel: current,
+				root:       tw.root, // 共享 root
+			}
+			for i := 0; i < newHigherLevel.slotNum; i++ {
+				newHigherLevel.slots[i] = list.New()
+			}
+			current.higherLevel = newHigherLevel
+		}
+		current = current.higherLevel
+	}
+
+	// 在找到的层级中添加任务
+	return current.addTaskInternal(task)
+}
+
+// addTaskInternal 将任务添加到当前时间轮（必须在锁内调用）
+func (tw *TimeWheel) addTaskInternal(task *Task) error {
+	delay := task.delay
+	if delay < tw.interval {
+		delay = tw.interval // 至少延迟一个刻度
+	}
+
+	ticks := int64(delay / tw.interval)
+	circle := int(ticks / int64(tw.slotNum))
+	pos := (tw.currentPos + int(ticks)) % tw.slotNum
+	task.circle = circle
+	task.level = tw.level // 记录任务所在的层级
+
+	element := tw.slots[pos].PushBack(task)
+	// 所有任务索引都存储在 root timer 中
+	tw.root.timer[task.key] = &timerEntry{
+		task:      task,
+		slotIndex: pos,
+		element:   element,
+	}
+
+	log.Printf("添加任务: key=%v, 延迟=%v, 层级=%d, 位置=%d, 圈数=%d",
+		task.key, task.delay, tw.level, pos, circle)
+	return nil
+}
+
+// RemoveTask 删除任务
+func (tw *TimeWheel) RemoveTask(key interface{}) bool {
+	tw.root.taskMutex.Lock()
+	defer tw.root.taskMutex.Unlock()
+	return tw.root.removeTaskInternal(key)
+}
+
+// removeTaskInternal 直接在 root.timer 中查找并删除任务（必须在锁内调用）
+func (tw *TimeWheel) removeTaskInternal(key interface{}) bool {
+	// 从 root 的 timer map 中查找任务
+	if entry, exists := tw.root.timer[key]; exists {
+		// 从任务所在的层级的槽位中移除
+		// 注意：entry.task.wheel.slots[entry.slotIndex].Remove(entry.element) 这种方式更理想，但需要给Task增加wheel指针
+		// 为了简化，我们先找到对应的wheel
+		wheel := tw.findWheelByLevel(entry.task.level)
+		if wheel != nil {
+			wheel.slots[entry.slotIndex].Remove(entry.element)
+			delete(tw.root.timer, key)
+			log.Printf("删除任务: key=%v, 层级=%d", key, entry.task.level)
+			return true
+		}
+	}
+	return false
+}
+
+// findWheelByLevel 根据层级找到对应的 wheel 指针
+func (tw *TimeWheel) findWheelByLevel(level int) *TimeWheel {
+	current := tw.root
+	for current != nil && current.level != level {
+		current = current.higherLevel
+	}
+	return current
 }
