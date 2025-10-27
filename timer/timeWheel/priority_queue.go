@@ -43,7 +43,8 @@ func (pq *priorityQueue) Push(x interface{}) {
 	n := len(*pq)
 	c := cap(*pq)
 	if n+1 > c {
-		npq := make(priorityQueue, n, c*2)
+		newCap := max(c * 2, 8)
+		npq := make(priorityQueue, n, newCap)
 		copy(npq, *pq)
 		*pq = npq
 	}
@@ -57,7 +58,12 @@ func (pq *priorityQueue) Pop() interface{} {
 	n := len(*pq)
 	c := cap(*pq)
 	if n < (c/2) && c > 25 {
-		npq := make(priorityQueue, n, c/2)
+		newCap := c / 2
+		if newCap < n {
+			newCap = n
+		}
+
+		npq := make(priorityQueue, n, newCap)
 		copy(npq, *pq)
 		*pq = npq
 	}
