@@ -1,3 +1,10 @@
+// RankCache 前 N 名结果的轻量级缓存
+//
+// 设计要点：
+// - 以 limit 作为键缓存不同维度的 TopN 结果；
+// - 使用短 TTL（duration）权衡实时性与性能；
+// - 读写分离锁：Get 使用 RLock，Set/Invalidate 使用 Lock，避免数据竞争；
+// - Get 返回副本以避免外部修改导致共享数据不一致。
 package domain
 
 import (

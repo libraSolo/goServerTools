@@ -2,9 +2,23 @@ package domain
 
 import (
 	"container/heap"
+	"errors"
 	"sync"
 	"time"
 )
+
+// RankConfig 排行榜配置
+type RankConfig struct {
+	TotalPlayers int     `json:"total_players"`
+	RewardRatio  float64 `json:"reward_ratio"`
+	MinReward    int     `json:"min_reward"`
+	MaxReward    int     `json:"max_reward"`
+}
+
+type ScoreUpdate struct {
+	PlayerID int64 `json:"player_id" binding:"required"`
+	Score    int64 `json:"score" binding:"required"`
+}
 
 // HybridLeaderboard 混合策略排行榜（跳表 + 分段）
 type HybridLeaderboard struct {
@@ -113,7 +127,7 @@ func (lb *HybridLeaderboard) applySingleUpdate(playerID, score int64) {
 		}
 	} else {
 		// 更新现有玩家
-		oldScore := player.Score
+		//oldScore := player.Score
 		lb.skipList.UpdateScore(player, score)
 
 		// 更新前K名逻辑
@@ -161,15 +175,15 @@ func (lb *HybridLeaderboard) GetPlayerRank(playerID int64) (int, error) {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
-	_, exists := lb.playerMap[playerID]
+	player, exists := lb.playerMap[playerID]
 	if !exists {
-		return 0, ErrPlayerNotFound
+		return 0, errors.New("player not found")
 	}
 
-	// 使用跳表获取精确排名
-	rank, found := lb.skipList.GetRank(playerID)
+	// 使用跳表基于排序键获取精确排名
+	rank, found := lb.skipList.GetRankByPlayer(player)
 	if !found {
-		return 0, ErrPlayerNotFound
+		return 0, errors.New("player not found")
 	}
 
 	return rank, nil
@@ -187,20 +201,17 @@ func (lb *HybridLeaderboard) GetTopRanks(limit int) []*Player {
 
 // refreshTopRanks 刷新前N名缓存
 func (lb *HybridLeaderboard) refreshTopRanks(limit int) []*Player {
-	lb.mu.RLock()
-	defer lb.mu.RUnlock()
+    lb.mu.RLock()
+    defer lb.mu.RUnlock()
 
-	if limit > lb.topHeap.Len() {
-		limit = lb.topHeap.Len()
-	}
+    // 直接使用跳表获取前 N 名，保证顺序正确
+    if limit > lb.skipList.Length() {
+        limit = lb.skipList.Length()
+    }
+    result := lb.skipList.GetRange(1, limit)
 
-	result := make([]*Player, limit)
-	for i := 0; i < limit; i++ {
-		result[i] = (*lb.topHeap)[i]
-	}
-
-	lb.cache.SetTopRanks(limit, result)
-	return result
+    lb.cache.SetTopRanks(limit, result)
+    return result
 }
 
 // GetNearbyRanks 获取临近排名 - O(log n + k)

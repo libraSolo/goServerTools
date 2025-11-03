@@ -2,9 +2,7 @@ package main
 
 import (
 	"log"
-	"rank-system/api"
 	"rank-system/domain"
-	"rank-system/storage"
 
 	"github.com/gin-gonic/gin"
 )

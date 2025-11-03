@@ -11,4 +11,5 @@ use (
 	./timer/crontab
 	./timer/timeWheel
 	chart/rank-system
+	chart/chart
 )
