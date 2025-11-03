@@ -4,9 +4,11 @@ use (
 	./async/async
 	./async/gwutils
 	./async/post
+	./chart/leaderboard
+	./go-trie-tst
 	./pubsub/common
 	./pubsub/pubsub
-	./go-trie-tst
-	./timer/timeWheel
 	./timer/crontab
+	./timer/timeWheel
+	chart/rank-system
 )

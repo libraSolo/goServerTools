@@ -1,212 +1,199 @@
-package pubsub // 通用发布订阅：与引擎解耦的主题发布/订阅实现（支持末尾通配 '*')
+package pubsub
 
 import (
-    "common"
-    "sync"
-    "trietst"
+	"common"
+	"fmt"
+	"sync"
+	"trietst"
 )
 
-// Handler 为订阅者的回调函数类型
-// 当匹配到发布的主题时，服务将调用对应订阅者的 Handler
-type Handler func(subject string, content string)
+// Handler 为泛型订阅者的回调函数类型
+type Handler[T any] func(subject string, content T)
 
-// subscribing 表示某主题前缀的订阅集合（精确+通配）
+// subscribing 表示某主题前缀的订阅集合
 type subscribing struct {
-    subscribers         common.StringSet // 精确订阅该主题的订阅者
-    wildcardSubscribers common.StringSet // 通配订阅该主题前缀（subject + '*') 的订阅者
+	subscribers         common.StringSet
+	wildcardSubscribers common.StringSet
 }
 
 func newSubscribing() *subscribing {
-    return &subscribing{
-        subscribers:         common.StringSet{},
-        wildcardSubscribers: common.StringSet{},
-    }
+	return &subscribing{
+		subscribers:         common.StringSet{},
+		wildcardSubscribers: common.StringSet{},
+	}
 }
 
-// GenericPubSub 为通用发布订阅服务
-// - 支持精确主题订阅与前缀通配订阅（仅允许末尾 '*')
-// - 发布时按前缀树逐层匹配通配订阅、末端匹配精确订阅
-// - 每个订阅者使用唯一的 Handler 接收消息
-type GenericPubSub struct {
-    mu   sync.RWMutex
-    tree trietst.Trie
+// GenericPubSub 为通用发布订阅服务（泛型版）
+type GenericPubSub[T any] struct {
+	mu   sync.RWMutex
+	tree trietst.Trie
 
-    // 记录订阅者的已订阅主题（便于取消订阅 / 取消所有）
-    subscriberExactSubjects    map[string]common.StringSet
-    subscriberWildcardSubjects map[string]common.StringSet
-    subscriberHandlers         map[string]Handler
+	subscriberExactSubjects    map[string]common.StringSet
+	subscriberWildcardSubjects map[string]common.StringSet
+	subscriberHandlers         map[string]Handler[T]
 }
 
 // NewGenericPubSub 创建一个新的通用发布订阅服务实例
-func NewGenericPubSub() *GenericPubSub {
-    return &GenericPubSub{
-        subscriberExactSubjects:    map[string]common.StringSet{},
-        subscriberWildcardSubjects: map[string]common.StringSet{},
-        subscriberHandlers:         map[string]Handler{},
-    }
+func NewGenericPubSub[T any]() *GenericPubSub[T] {
+	return &GenericPubSub[T]{
+		subscriberExactSubjects:    map[string]common.StringSet{},
+		subscriberWildcardSubjects: map[string]common.StringSet{},
+		subscriberHandlers:         map[string]Handler[T]{},
+	}
 }
 
-// Subscribe 订阅主题（支持末尾通配 '*')
-// 规则：
-// - '*' 仅允许出现在主题末尾，且最多一次
-// - 主题可为空，形如 "*" 表示订阅所有主题（匹配任意前缀）
-// - 每个订阅者仅保存一个 Handler，重复订阅将更新该订阅者的 Handler
-func (ps *GenericPubSub) Subscribe(subscriberID string, subject string, handler Handler) {
-    ps.mu.Lock()
-    defer ps.mu.Unlock()
+// Subscribe 订阅主题，返回错误而不是 panic
+func (ps *GenericPubSub[T]) Subscribe(subscriberID string, subject string, handler Handler[T]) error {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 
-    // 校验 '*' 位置
-    for i, c := range subject {
-        if c == '*' && i != len(subject)-1 {
-            panic("'*' can only be used at the end of subject while subscribing")
-        }
-    }
+	if subscriberID == "" {
+		return fmt.Errorf("subscriberID cannot be empty")
+	}
+	if handler == nil {
+		return fmt.Errorf("handler cannot be nil")
+	}
+	for i, c := range subject {
+		if c == '*' && i != len(subject)-1 {
+			return fmt.Errorf("'*' can only be used at the end of subject")
+		}
+	}
 
-    // 更新订阅者的 Handler（最后一次订阅生效）
-    if handler != nil {
-        ps.subscriberHandlers[subscriberID] = handler
-    }
+	ps.subscriberHandlers[subscriberID] = handler
 
-    wildcard := false
-    if subject != "" && subject[len(subject)-1] == '*' {
-        wildcard = true
-        subject = subject[:len(subject)-1]
-    }
+	wildcard := false
+	if subject != "" && subject[len(subject)-1] == '*' {
+		wildcard = true
+		subject = subject[:len(subject)-1]
+	}
 
-    subs := ps.getSubscribing(subject, true)
-    if !wildcard {
-        subs.subscribers.Add(subscriberID)
-        exactSet := ps.subscriberExactSubjects[subscriberID]
-        if exactSet == nil {
-            exactSet = common.StringSet{}
-            ps.subscriberExactSubjects[subscriberID] = exactSet
-        }
-        exactSet.Add(subject)
-    } else {
-        subs.wildcardSubscribers.Add(subscriberID)
-        wildcardSet := ps.subscriberWildcardSubjects[subscriberID]
-        if wildcardSet == nil {
-            wildcardSet = common.StringSet{}
-            ps.subscriberWildcardSubjects[subscriberID] = wildcardSet
-        }
-        wildcardSet.Add(subject)
-    }
+	subs := ps.getSubscribing(subject, true)
+	if !wildcard {
+		subs.subscribers.Add(subscriberID)
+		exactSet, ok := ps.subscriberExactSubjects[subscriberID]
+		if !ok {
+			exactSet = common.StringSet{}
+			ps.subscriberExactSubjects[subscriberID] = exactSet
+		}
+		exactSet.Add(subject)
+	} else {
+		subs.wildcardSubscribers.Add(subscriberID)
+		wildcardSet, ok := ps.subscriberWildcardSubjects[subscriberID]
+		if !ok {
+			wildcardSet = common.StringSet{}
+			ps.subscriberWildcardSubjects[subscriberID] = wildcardSet
+		}
+		wildcardSet.Add(subject)
+	}
+	return nil
 }
 
-// Unsubscribe 取消订阅主题（支持末尾通配 '*')
-func (ps *GenericPubSub) Unsubscribe(subscriberID string, subject string) {
-    ps.mu.Lock()
-    defer ps.mu.Unlock()
+// Unsubscribe 取消订阅
+func (ps *GenericPubSub[T]) Unsubscribe(subscriberID string, subject string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 
-    for i, c := range subject {
-        if c == '*' && i != len(subject)-1 {
-            panic("'*' can only be used at the end of subject while unsubscribing")
-        }
-    }
+	wildcard := false
+	if subject != "" && subject[len(subject)-1] == '*' {
+		wildcard = true
+		subject = subject[:len(subject)-1]
+	}
 
-    wildcard := false
-    if subject != "" && subject[len(subject)-1] == '*' {
-        wildcard = true
-        subject = subject[:len(subject)-1]
-    }
+	subs := ps.getSubscribing(subject, false)
+	if subs == nil {
+		return
+	}
 
-    subs := ps.getSubscribing(subject, false)
-    if subs == nil {
-        return
-    }
-    if !wildcard {
-        subs.subscribers.Remove(subscriberID)
-        if exactSet := ps.subscriberExactSubjects[subscriberID]; exactSet != nil {
-            exactSet.Remove(subject)
-        }
-    } else {
-        subs.wildcardSubscribers.Remove(subscriberID)
-        if wildcardSet := ps.subscriberWildcardSubjects[subscriberID]; wildcardSet != nil {
-            wildcardSet.Remove(subject)
-        }
-    }
+	if !wildcard {
+		subs.subscribers.Remove(subscriberID)
+		if exactSet, ok := ps.subscriberExactSubjects[subscriberID]; ok {
+			exactSet.Remove(subject)
+		}
+	} else {
+		subs.wildcardSubscribers.Remove(subscriberID)
+		if wildcardSet, ok := ps.subscriberWildcardSubjects[subscriberID]; ok {
+			wildcardSet.Remove(subject)
+		}
+	}
 }
 
-// UnsubscribeAll 取消该订阅者的所有订阅（包括精确和通配）
-func (ps *GenericPubSub) UnsubscribeAll(subscriberID string) {
-    ps.mu.Lock()
-    defer ps.mu.Unlock()
+// UnsubscribeAll 取消该订阅者的所有订阅
+func (ps *GenericPubSub[T]) UnsubscribeAll(subscriberID string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 
-    if exactSet, ok := ps.subscriberExactSubjects[subscriberID]; ok {
-        delete(ps.subscriberExactSubjects, subscriberID)
-        for subject := range exactSet {
-            subs := ps.getSubscribing(subject, false)
-            if subs != nil {
-                subs.subscribers.Remove(subscriberID)
-            }
-        }
-    }
-    if wildcardSet, ok := ps.subscriberWildcardSubjects[subscriberID]; ok {
-        delete(ps.subscriberWildcardSubjects, subscriberID)
-        for subject := range wildcardSet {
-            subs := ps.getSubscribing(subject, false)
-            if subs != nil {
-                subs.wildcardSubscribers.Remove(subscriberID)
-            }
-        }
-    }
+	if exactSet, ok := ps.subscriberExactSubjects[subscriberID]; ok {
+		delete(ps.subscriberExactSubjects, subscriberID)
+		for subject := range exactSet {
+			if subs := ps.getSubscribing(subject, false); subs != nil {
+				subs.subscribers.Remove(subscriberID)
+			}
+		}
+	}
+
+	if wildcardSet, ok := ps.subscriberWildcardSubjects[subscriberID]; ok {
+		delete(ps.subscriberWildcardSubjects, subscriberID)
+		for subject := range wildcardSet {
+			if subs := ps.getSubscribing(subject, false); subs != nil {
+				subs.wildcardSubscribers.Remove(subscriberID)
+			}
+		}
+	}
 }
 
-// Publish 发布主题与内容（主题中不允许出现 '*')
-func (ps *GenericPubSub) Publish(subject string, content string) {
-    ps.mu.RLock()
-    defer ps.mu.RUnlock()
+// Publish 发布主题与内容，返回错误而不是 panic
+func (ps *GenericPubSub[T]) Publish(subject string, content T) error {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
 
-    for _, c := range subject {
-        if c == '*' {
-            panic("subject should not contains '*' while publishing")
-        }
-    }
+	for _, c := range subject {
+		if c == '*' {
+			return fmt.Errorf("subject should not contain '*' while publishing")
+		}
+	}
 
-    ps.publishInTree(subject, content, &ps.tree, 0)
+	ps.publishInTree(subject, content, &ps.tree, 0)
+	return nil
 }
 
-// 递归沿前缀树匹配并调用订阅者
-func (ps *GenericPubSub) publishInTree(subject string, content string, st *trietst.Trie, idx int) {
-    subs := ps.getSubscribingOfTree(st, false)
-    if subs != nil {
-        // 调用当前层的通配订阅者（prefix+'*')
-        for subscriberID := range subs.wildcardSubscribers {
-            if h := ps.subscriberHandlers[subscriberID]; h != nil {
-                h(subject, content)
-            }
-        }
-    }
-    if idx < len(subject) {
-        ps.publishInTree(subject, content, st.Child(subject[idx]), idx+1)
-    } else {
-        // 精确匹配到叶子节点，调用精确订阅者
-        if subs != nil {
-            for subscriberID := range subs.subscribers {
-                if h := ps.subscriberHandlers[subscriberID]; h != nil {
-                    h(subject, content)
-                }
-            }
-        }
-    }
+// 递归发布
+func (ps *GenericPubSub[T]) publishInTree(subject string, content T, st *trietst.Trie, idx int) {
+	if subs := ps.getSubscribingOfTree(st, false); subs != nil {
+		for subscriberID := range subs.wildcardSubscribers {
+			if h, ok := ps.subscriberHandlers[subscriberID]; ok {
+				h(subject, content)
+			}
+		}
+	}
+
+	if idx < len(subject) {
+		ps.publishInTree(subject, content, st.Child(subject[idx]), idx+1)
+	} else {
+		if subs := ps.getSubscribingOfTree(st, false); subs != nil {
+			for subscriberID := range subs.subscribers {
+				if h, ok := ps.subscriberHandlers[subscriberID]; ok {
+					h(subject, content)
+				}
+			}
+		}
+	}
 }
 
-// 获取指定主题的订阅集合（按需创建）
-func (ps *GenericPubSub) getSubscribing(subject string, newIfNotExists bool) *subscribing {
-    t := ps.tree.Sub(subject)
-    return ps.getSubscribingOfTree(t, newIfNotExists)
+// 获取订阅集合
+func (ps *GenericPubSub[T]) getSubscribing(subject string, create bool) *subscribing {
+	t := ps.tree.Sub(subject)
+	return ps.getSubscribingOfTree(t, create)
 }
 
-// 从树节点取订阅集合
-func (ps *GenericPubSub) getSubscribingOfTree(t *trietst.Trie, newIfNotExists bool) *subscribing {
-    var subs *subscribing
-    if t.Val == nil {
-        if newIfNotExists {
-            subs = newSubscribing()
-            t.Val = subs
-        }
-    } else {
-        subs = t.Val.(*subscribing)
-    }
-    return subs
+// 从树节点获取订阅集合
+func (ps *GenericPubSub[T]) getSubscribingOfTree(t *trietst.Trie, create bool) *subscribing {
+	if t.Val == nil {
+		if create {
+			subs := newSubscribing()
+			t.Val = subs
+			return subs
+		}
+		return nil
+	}
+	return t.Val.(*subscribing)
 }
