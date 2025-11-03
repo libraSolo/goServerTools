@@ -24,15 +24,41 @@ func (h timerHeap) Swap(i, j int) {
 }
 
 func (h *timerHeap) Push(x interface{}) {
-	*h = append(*h, x.(*Timer))
+	n := len(*h)
 
-	
+	// 动态扩容
+	if n + 1 > cap(*h) {
+		newCap := max(cap(*h)*2, 8)
+		newH := make(timerHeap, n, newCap)
+		copy(newH, *h)
+		*h = newH
+	}
+
+	*h = (*h)[:n+1]
+	item := x.(*Timer)
+	(*h)[n] = item
 }
 
 func (h *timerHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
+	n := len(*h)
+	if n == 0 {
+		return nil
+	}
+
+	c := cap(*h)
+
+	// 动态收缩
+	if n < (c / 2) && c > 25 {
+		newCap := c / 2
+		if newCap < n {
+			newCap = n
+		}
+		newH := make(timerHeap, n, newCap)
+		copy(newH, *h)
+		*h = newH
+	}
+
+	x := (*h)[n - 1]
+	*h = (*h)[:n - 1]
 	return x
 }
