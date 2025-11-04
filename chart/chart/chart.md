@@ -1,106 +1,75 @@
 # Chart 排行榜服务（混合策略）
 
-本包实现基于“跳表 + 前K名最小堆 + 轻量缓存”的混合策略排行榜，提供高并发下的快速分数更新、精确排名查询和前 N 名查询。HTTP 接口基于 Gin 暴露，默认启动在 `:8080`。
+本模块提供基于“跳表 + 前 K 名最小堆 + 轻量缓存”的混合策略排行榜，实现高并发下的分数更新、精确排名查询和 TopN 读取。HTTP 接口使用 Gin 暴露，默认监听 `:8080`。
 
 ## 目录结构
 ```
 chart/
-├── api/              # 接口层
-│   └── handle.go     # 路由注册与 HTTP 处理器
-├── domain/           # 领域层（核心数据结构与算法）
-│   ├── cache.go      # 前 N 名结果缓存
-│   ├── heap.go       # TopPlayersHeap 最小堆（维护前 K）
-│   ├── leaderboard.go# HybridLeaderboard 混合排行榜
-│   ├── player.go     # 玩家实体
-│   └── skipList.go   # 跳表实现（精确排名）
-├── storage/          # 基础设施层
-│   ├── memory.go     # 内存仓储实现
-│   ├── multiBackend.go# 预留：多后端组合
-│   └── repository.go # 仓储接口定义
-├── main.go           # 程序入口（初始化默认排行榜与路由）
-└── chart.md          # 本说明文档
+├── api/               # 接口层（Gin 路由与处理器）
+│   └── handle.go      # HTTP 路由注册与请求处理
+├── domain/            # 领域层（核心数据结构与算法）
+│   ├── cache.go       # RankCache：TopN 轻量缓存
+│   ├── heap.go        # TopPlayersHeap：维护前 K 名
+│   ├── leaderboard.go # HybridLeaderboard：混合排行榜聚合根
+│   ├── player.go      # Player：玩家实体（Rank 仅用于响应填充）
+│   └── skipList.go    # SkipList：精确排名（O(log n)）
+├── storage/           # 基础设施层（仓储抽象与示例实现）
+│   ├── repository.go  # 仓储接口定义
+│   ├── memory.go      # 内存仓储示例（依赖工作区 rank-system/domain）
+│   └── multiBackend.go# 多后端组合（示例/预留）
+├── main.go            # 程序入口：初始化默认排行榜与路由
+└── chart.md           # 本说明文档
 ```
 
 ## 架构概览
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌───────────────────────────┐
-│     Client      │ -> │     Gin Router    │ -> │        Handler (API)       │
-└─────────────────┘    └──────────────────┘    └─────────────┬─────────────┘
-                                                              │
-                                         ┌────────────────────┴────────────────────┐
-                                         │              Domain Layer               │
-                                         │  HybridLeaderboard (跳表 + 最小堆 + 缓存) │
-                                         └─────────────┬──────────────┬───────────┘
-                                                       │              │
-                                           ┌───────────┘              └───────────┐
-                                           │                                       │
-                                    SkipList (排名)                        TopPlayersHeap (前K)
-                                           │                                       │
-                                           └───────────────┬───────────────────────┘
-                                                           │
-                                                    RankCache (轻量缓存)
-
-                                          ┌───────────────────────────────────────┐
-                                          │            Storage Layer               │
-                                          │        MemoryRepository（示例）        │
-                                          └───────────────────────────────────────┘
+Client -> Gin Router -> API Handler -> HybridLeaderboard
+                               ├── SkipList（精确排名）
+                               ├── TopPlayersHeap（前 K 快速读取）
+                               └── RankCache（TopN 短时缓存）
+Storage：MemoryRepository（示例，可扩展为 Redis/SQL 等）
 ```
 
 ## 核心能力
-- 更新分数：`PUT /api/v1/scores`（支持高并发与批量通道）
-- 查询玩家排名：`GET /api/v1/player-rank`（跳表 O(log n) 精确排名）
-- 查询前 N 名：`GET /api/v1/top-ranks`（基于最小堆与缓存，近似 O(1)）
-- 获取排行榜信息：`GET /api/v1/leaderboard`
+- 更新分数：`PUT /api/v1/scores`（批量通道 + 同步回退）
+- 查询玩家排名：`GET /api/v1/player-rank`（跳表精确排名，O(log n)）
+- 查询前 N 名：`GET /api/v1/top-ranks`（缓存/跳表生成，近似 O(1)）
+- 获取榜单信息：`GET /api/v1/leaderboard`
 
 ## HTTP 接口
 - `PUT /api/v1/scores?leaderboard_id=<id>`
   - Body：`{ "player_id": number, "score": number }`
-  - 结果：`{ "status": "success" }`
-
+  - 返回：`{ "status": "success" }`
 - `GET /api/v1/player-rank?leaderboard_id=<id>&player_id=<id>`
-  - 结果：`{ "player_id": number, "rank": number }`
-
+  - 返回：`{ "player_id": number, "rank": number }`
 - `GET /api/v1/top-ranks?leaderboard_id=<id>&limit=<n>`
-  - 结果：`[ { "id": number, "score": number, "rank": number }, ... ]`
-
+  - 返回：`[{ "id": number, "score": number, "rank": number, "update_time": string }, ...]`
 - `GET /api/v1/leaderboard?leaderboard_id=<id>`
-  - 结果：`{ "id": string, "name": string, "player_count": number, "config": {...} }`
+  - 返回：`{ "id": string, "name": string, "player_count": number, "config": {...} }`
 
-## 数据结构与复杂度
-- 跳表（SkipList）：插入/删除/排名查询约 `O(log n)`；按更新时间与分数稳定排序
-- 前 K 名最小堆（TopPlayersHeap）：维护高分集，`Push/Pop O(log K)`，读取近似 `O(1)`
-- 结果缓存（RankCache）：针对不同 `limit` 缓存前 N 名，TTL 短（例如 2s）以兼顾实时性与性能
-- 批量更新通道：后台聚合处理，减少锁竞争并提升吞吐
-
-## 设计要点
-- 精确排名与热点读取分离：跳表负责全量排名，堆与缓存负责热点 TopN
-- 版本与失效：批量更新推进版本，主动失效缓存确保数据一致性
-- 并发安全：读写锁保护玩家映射与堆结构；缓存读写分离
+## 关键设计与复杂度
+- 跳表 SkipList：插入/删除/排名查询约 `O(log n)`；同分时按 `UpdateTime` 与 `ID` 稳定排序。
+- 前 K 名 TopPlayersHeap：维护高分集，`Push/Pop O(log K)`，读取近似 `O(1)`。
+- RankCache：以 `limit` 为键缓存 TopN，短 TTL（例如数秒）兼顾实时性与性能；返回副本避免竞态。
+- 批量更新通道：生产者将更新写入 `batchUpdates`；通道满时自动回退到同步更新，降低丢包风险。
+- 一致性：每次批处理后提升 `version` 并 `Invalidate()` 缓存；读取路径不修改共享实体。
 
 ## 运行与工作区说明
-- 本包的导入路径与模块设置依赖工作区（`go.work`）中 `chart/rank-system` 等模块；若需直接运行，请确保模块路径与 `go.mod` 配置完整。
-- 典型入口：`main.go` 会创建一个默认排行榜并注册所有路由，然后在 `:8080` 启动服务。
+- 本模块已自包含，不再依赖 `rank-system/domain`。所有领域与存储类型均在 `chart/domain` 与 `chart/storage` 下实现。
+- 入口 `main.go` 会创建默认榜单并注册路由：
+  - 运行：`go run ./chart/chart`
+  - 监听：`:8080`
 
-## 后续扩展建议
-- 增加持久化后端（如 Redis / SQL），完善 `storage.Repository` 的实现
-- 丰富排行榜策略（分段、赛季、去重、多维度排名）
-- 增加邻近排名、区间查询等接口（`GetNearbyRanks` 已具备基础能力）
+## 注意事项
+- `Player.Rank` 字段仅用作响应 DTO 填充，实体内的排名不持久存储；请通过接口或服务层实时计算排名。
+- TopN 返回为副本，避免外部修改导致共享数据一致性问题。
+- 大规模并发写入可通过批量通道实现，断言前需确保后台批处理完成（参见测试用例）。
 
-——
-以上内容对齐仓库内其他模块说明风格，便于快速理解与集成。
-│   客户端请求      │    │    API接口层      │    │    领域层        │
-│                 │    │                  │    │                 │
-│ - 更新分数       │───▶│ - HTTP路由       │───▶│ - 跳表索引      │
-│ - 查询排名       │    │ - 参数验证       │    │ - 前K名堆       │
-│ - 获取榜单       │    │ - 响应格式化     │    │ - 缓存策略      │
-└─────────────────┘    └──────────────────┘    └─────────┬───────┘
-                                                         │
-                                                         ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   存储层         │    │    监控层         │    │    扩展层        │
-│                 │    │                  │    │                 │
-│ - 内存存储       │◀──│ - 性能指标       │───▶│ - 插件系统      │
-│ - Redis缓存     │    │ - 业务监控       │    │ - 分片策略      │
-│ - 持久化接口     │    │ - 告警系统       │    │ - 多算法支持    │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+## 扩展建议
+- 增加持久化后端（Redis/SQL），实现 `storage.Repository` 的真实读写；
+- 丰富查询接口（邻近排名、区间查询、分页 TopN）；
+- 分季/分片策略与多榜单管理；
+- 监控与指标（延迟、吞吐、缓存命中率）。
+
+以上文档已与当前代码结构对齐，便于快速理解与集成使用。
 

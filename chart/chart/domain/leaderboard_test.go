@@ -1,8 +1,9 @@
 package domain
 
 import (
-	"testing"
-	"time"
+    "sync"
+    "testing"
+    "time"
 )
 
 // helper: 创建并预置一个排行榜，含同分数的先后顺序判断
@@ -139,4 +140,132 @@ func TestLeaderboardCacheInvalidateOnUpdate(t *testing.T) {
 	if !containsAll(ids, []int64{5}) {
 		t.Fatalf("TopRanks should contain player 5 after update, got=%v", ids)
 	}
+}
+
+func TestLeaderboardLargeScale100k(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-scale test in short mode")
+	}
+
+	lb := NewHybridLeaderboard("large", "大数据榜", &RankConfig{TotalPlayers: 100000})
+	defer lb.Close()
+
+	const N = 100000
+	for i := 1; i <= N; i++ {
+		// 使用唯一分数，避免同分带来的不稳定排序
+		if err := lb.syncUpdateScore(int64(i), int64(i)); err != nil {
+			t.Fatalf("syncUpdateScore(%d) error: %v", i, err)
+		}
+	}
+
+	// 数量校验
+	if lb.GetPlayerCount() != N {
+		t.Fatalf("player count mismatch: got=%d want=%d", lb.GetPlayerCount(), N)
+	}
+
+	// 排名校验：分数越大排名越靠前
+	rTop, err := lb.GetPlayerRank(int64(N))
+	if err != nil || rTop != 1 {
+		t.Fatalf("rank of top player mismatch: got=%d err=%v want=1", rTop, err)
+	}
+	rBottom, err := lb.GetPlayerRank(1)
+	if err != nil || rBottom != N {
+		t.Fatalf("rank of lowest player mismatch: got=%d err=%v want=%d", rBottom, err, N)
+	}
+
+	// TopN 校验：应包含最高分的若干 ID（不强依赖内部顺序）
+	top := lb.GetTopRanks(5)
+	if len(top) != 5 {
+		t.Fatalf("TopRanks length mismatch: got=%d want=5", len(top))
+	}
+	ids := make(map[int64]bool, 5)
+	for _, p := range top {
+		ids[p.ID] = true
+	}
+	for want := int64(N); want > int64(N-5); want-- {
+		if !ids[want] {
+			t.Fatalf("TopRanks should contain id=%d, got=%v", want, top)
+		}
+	}
+}
+
+func BenchmarkLeaderboardInsert100k(b *testing.B) {
+    for n := 0; n < b.N; n++ {
+        lb := NewHybridLeaderboard("bench", "基准", &RankConfig{TotalPlayers: 100000})
+        // 可选：b.StopTimer()/b.StartTimer() 包裹非关键阶段
+        for i := 1; i <= 100000; i++ {
+            _ = lb.syncUpdateScore(int64(i), int64(i))
+        }
+        lb.Close()
+    }
+}
+
+// 并发插入 10 万数据，使用 UpdateScore 走异步批处理路径，并在 Close 后断言
+func TestLeaderboardConcurrentInsert100k(t *testing.T) {
+    if testing.Short() {
+        t.Skip("skipping large-scale concurrent test in short mode")
+    }
+
+    lb := NewHybridLeaderboard("concurrent", "并发榜", &RankConfig{TotalPlayers: 100000})
+
+    const N = 100000
+    const workers = 16
+
+    jobs := make(chan int64, 10000)
+    var wg sync.WaitGroup
+
+    // 启动固定数量的 worker 并发发送更新（唯一分数，避免同分不稳定）
+    for w := 0; w < workers; w++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for id := range jobs {
+                if err := lb.UpdateScore(id, id); err != nil {
+                    t.Fatalf("UpdateScore(%d) error: %v", id, err)
+                }
+            }
+        }()
+    }
+
+    // 投递任务
+    for i := int64(1); i <= N; i++ {
+        jobs <- i
+    }
+    close(jobs)
+    wg.Wait()
+
+    // 关闭以 flush 批处理并退出后台协程
+    lb.Close()
+    // 等待后台批处理协程完全退出并处理完缓冲数据
+    // Close 仅关闭通道，不阻塞等待消费者结束，这里做短轮询以确保处理完成
+    deadline := time.Now().Add(5 * time.Second)
+    for time.Now().Before(deadline) {
+        if lb.GetPlayerCount() == N {
+            break
+        }
+        time.Sleep(10 * time.Millisecond)
+    }
+
+    // 断言：数量与关键排名
+    if lb.GetPlayerCount() != N {
+        t.Fatalf("player count mismatch: got=%d want=%d", lb.GetPlayerCount(), N)
+    }
+
+    rTop, err := lb.GetPlayerRank(N)
+    if err != nil || rTop != 1 {
+        t.Fatalf("rank of top player mismatch: got=%d err=%v want=1", rTop, err)
+    }
+    rBottom, err := lb.GetPlayerRank(1)
+    if err != nil || rBottom != N {
+        t.Fatalf("rank of lowest player mismatch: got=%d err=%v want=%d", rBottom, err, N)
+    }
+
+    top := lb.GetTopRanks(5)
+    if len(top) != 5 {
+        t.Fatalf("TopRanks length mismatch: got=%d want=5", len(top))
+    }
+    ids := idsOf(top)
+    if !containsAll(ids, []int64{N, N - 1, N - 2, N - 3, N - 4}) {
+        t.Fatalf("TopRanks should contain highest 5 ids, got=%v", ids)
+    }
 }

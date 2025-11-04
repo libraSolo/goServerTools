@@ -107,28 +107,28 @@ func (sl *SkipList) GetRange(start, end int) []*Player {
 		return nil
 	}
 
-    result := make([]*Player, 0, end-start+1)
-    traversed := 0
-    x := sl.header
+	result := make([]*Player, 0, end-start+1)
+	traversed := 0
+	x := sl.header
 
-    // 自顶向下定位到 rank=start 的前一位置，保持不越过 start
-    for i := sl.level - 1; i >= 0; i-- {
-        for x.Level[i].Forward != nil && (traversed+x.Level[i].Span) < start {
-            traversed += x.Level[i].Span
-            x = x.Level[i].Forward
-        }
-    }
+	// 自顶向下定位到 rank=start 的前一位置，保持不越过 start
+	for i := sl.level - 1; i >= 0; i-- {
+		for x.Level[i].Forward != nil && (traversed+x.Level[i].Span) < start {
+			traversed += x.Level[i].Span
+			x = x.Level[i].Forward
+		}
+	}
 
-    // 下一个节点即为 rank=start
-    x = x.Level[0].Forward
-    currentRank := traversed + 1
+	// 下一个节点即为 rank=start
+	x = x.Level[0].Forward
+	currentRank := traversed + 1
 
-    // 遍历范围内的节点，直到 rank=end
-    for x != nil && currentRank <= end {
-        result = append(result, x.Player)
-        x = x.Level[0].Forward
-        currentRank++
-    }
+	// 遍历范围内的节点，直到 rank=end
+	for x != nil && currentRank <= end {
+		result = append(result, x.Player)
+		x = x.Level[0].Forward
+		currentRank++
+	}
 
 	return result
 }
@@ -274,25 +274,24 @@ func (sl *SkipList) GetRank(playerID int64) (int, bool) {
 // 使用与插入相同的比较逻辑 comparePlayers，自顶向下按 span 累计 rank。
 // 复杂度：O(log n)
 func (sl *SkipList) GetRankByPlayer(player *Player) (int, bool) {
-    sl.mu.RLock()
-    defer sl.mu.RUnlock()
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
 
-    rank := 0
-    x := sl.header
+	rank := 0
+	x := sl.header
 
-    for i := sl.level - 1; i >= 0; i-- {
-        for x.Level[i].Forward != nil &&
-            comparePlayers(x.Level[i].Forward.Player, player) > 0 {
-            rank += x.Level[i].Span
-            x = x.Level[i].Forward
-        }
-    }
+	for i := sl.level - 1; i >= 0; i-- {
+		for x.Level[i].Forward != nil && comparePlayers(x.Level[i].Forward.Player, player) > 0 {
+			rank += x.Level[i].Span
+			x = x.Level[i].Forward
+		}
+	}
 
-    x = x.Level[0].Forward
-    if x != nil && x.Player.ID == player.ID {
-        return rank + 1, true
-    }
-    return 0, false
+	x = x.Level[0].Forward
+	if x != nil && x.Player.ID == player.ID {
+		return rank + 1, true
+	}
+	return 0, false
 }
 
 // UpdateScore 更新分数（需要删除再插入）

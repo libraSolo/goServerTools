@@ -4,10 +4,9 @@ import "time"
 
 // Player 表示排行榜中的一个玩家。
 type Player struct {
-	ID        int64     `json:"id"`
-	Score     int64     `json:"score"`
-	Rank      int       `json:"rank"`
-	UpdatedAt time.Time `json:"updated_at"`
+    ID        int64     `json:"id"`
+    Score     int64     `json:"score"`
+    UpdatedAt time.Time `json:"updated_at"`
 }
 
 // NewPlayer 创建一个新玩家。

@@ -62,22 +62,22 @@ func (l *Leaderboard) GetPlayerRank(playerID int64) (int64, error) {
 
 // GetTopN 获取排名前 N 的玩家。
 func (l *Leaderboard) GetTopN(n int) []*Player {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+    l.mu.RLock()
+    defer l.mu.RUnlock()
 
-	players := make([]*Player, 0, n)
-	node := l.sl.header.level[0].forward
-	for i := 0; i < n && node != nil; i++ {
-		players = append(players, node.Player)
-		node = node.level[0].forward
-	}
-	return players
+    players := make([]*Player, 0, n)
+    node := l.sl.header.level[0].forward
+    for i := 0; i < n && node != nil; i++ {
+        players = append(players, node.Player)
+        node = node.level[0].forward
+    }
+    return players
 }
 
 // GetNearbyRanks 获取玩家临近的排名。
 func (l *Leaderboard) GetNearbyRanks(playerID int64, count int) ([]*Player, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+    l.mu.RLock()
+    defer l.mu.RUnlock()
 
 	if node, ok := l.players[playerID]; ok {
 		rank := l.sl.GetRank(node.Player.Score, node.Player.ID)
@@ -86,17 +86,17 @@ func (l *Leaderboard) GetNearbyRanks(playerID int64, count int) ([]*Player, erro
 			startRank = 1
 		}
 
-		players := make([]*Player, 0, count)
-		startNode := l.sl.GetElementByRank(startRank)
-		if startNode == nil {
-			return players, nil
-		}
-		for i := 0; i < count && startNode != nil; i++ {
-			players = append(players, startNode.Player)
-			startNode = startNode.level[0].forward
-		}
-		return players, nil
-	}
+        players := make([]*Player, 0, count)
+        startNode := l.sl.GetElementByRank(startRank)
+        if startNode == nil {
+            return players, nil
+        }
+        for i := 0; i < count && startNode != nil; i++ {
+            players = append(players, startNode.Player)
+            startNode = startNode.level[0].forward
+        }
+        return players, nil
+    }
 
 	return nil, ErrPlayerNotFound
 }

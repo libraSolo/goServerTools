@@ -1,10 +1,12 @@
 package main
 
 import (
-	"log"
-	"rank-system/domain"
+    "log"
+    "chart/api"
+    "chart/domain"
+    "chart/storage"
 
-	"github.com/gin-gonic/gin"
+    "github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -19,7 +21,7 @@ func main() {
 		MaxReward:    1000,
 	}
 
-	leaderboard := domain.NewLeaderboard("default", "默认排行榜", config)
+    leaderboard := domain.NewHybridLeaderboard("default", "默认排行榜", config)
 	if err := repo.SaveLeaderboard(leaderboard); err != nil {
 		log.Fatal("Failed to create default leaderboard:", err)
 	}

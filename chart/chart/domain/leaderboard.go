@@ -9,15 +9,15 @@ import (
 
 // RankConfig 排行榜配置
 type RankConfig struct {
-	TotalPlayers int     `json:"total_players"`
-	RewardRatio  float64 `json:"reward_ratio"`
-	MinReward    int     `json:"min_reward"`
-	MaxReward    int     `json:"max_reward"`
+	TotalPlayers int     `json:"total_players"` // 总玩家数
+	RewardRatio  float64 `json:"reward_ratio"`  // 奖励比例
+	MinReward    int     `json:"min_reward"`    // 最小奖励
+	MaxReward    int     `json:"max_reward"`    // 最大奖励
 }
 
 type ScoreUpdate struct {
-	PlayerID int64 `json:"player_id" binding:"required"`
-	Score    int64 `json:"score" binding:"required"`
+	PlayerID int64 `json:"player_id" binding:"required"` // 玩家ID
+	Score    int64 `json:"score" binding:"required"`     // 玩家分数
 }
 
 // HybridLeaderboard 混合策略排行榜（跳表 + 分段）
@@ -29,7 +29,7 @@ type HybridLeaderboard struct {
 
 	// 核心数据结构
 	skipList  *SkipList         // 跳表 - 用于精确排名计算
-	topK      int               // 维护前K名
+	topK      int               // 维护前K名 没有降分淘汰，其topk的容量比返回大给定兼容即可
 	topHeap   *TopPlayersHeap   // 前K名最小堆 - 用于快速获取前N名
 	playerMap map[int64]*Player // 所有玩家数据 - O(1)查找
 	topMap    map[int64]*Player // 前K名玩家快速查找
@@ -80,10 +80,18 @@ func (lb *HybridLeaderboard) UpdateScore(playerID, score int64) error {
 func (lb *HybridLeaderboard) processBatchUpdates() {
 	batch := make([]*ScoreUpdate, 0, 100)
 	ticker := time.NewTicker(50 * time.Millisecond) // 更快的批处理
+	defer ticker.Stop()
 
+	// 单线程处理批量更新，不存在竞态
 	for {
 		select {
-		case update := <-lb.batchUpdates:
+		case update, ok := <-lb.batchUpdates:
+			if !ok {
+				if len(batch) > 0 {
+					lb.processBatch(batch)
+				}
+				return
+			}
 			batch = append(batch, update)
 			if len(batch) >= 100 {
 				lb.processBatch(batch)
@@ -96,6 +104,11 @@ func (lb *HybridLeaderboard) processBatchUpdates() {
 			}
 		}
 	}
+}
+
+// Close 关闭排行榜 - 释放资源
+func (lb *HybridLeaderboard) Close() {
+	close(lb.batchUpdates)
 }
 
 // processBatch 批量处理更新
@@ -161,13 +174,12 @@ func (lb *HybridLeaderboard) promoteToTop(player *Player) {
 
 // adjustTopPlayer 调整前K名玩家位置
 func (lb *HybridLeaderboard) adjustTopPlayer(player *Player) {
-	// 重新建堆保持正确顺序
-	newHeap := &TopPlayersHeap{}
-	for _, p := range lb.topMap {
-		*newHeap = append(*newHeap, p)
+
+	for index, p := range *lb.topHeap {
+		if player.ID == p.ID {
+			heap.Fix(lb.topHeap, index)
+		}
 	}
-	heap.Init(newHeap)
-	lb.topHeap = newHeap
 }
 
 // GetPlayerRank 获取玩家排名 - O(log n)
@@ -208,26 +220,46 @@ func (lb *HybridLeaderboard) refreshTopRanks(limit int) []*Player {
     if limit > lb.skipList.Length() {
         limit = lb.skipList.Length()
     }
-    result := lb.skipList.GetRange(1, limit)
+    original := lb.skipList.GetRange(1, limit)
+    // 返回副本并填充 Rank，避免修改共享实体导致竞态
+    ranked := make([]*Player, len(original))
+    for i, p := range original {
+        ranked[i] = &Player{
+            ID:         p.ID,
+            Score:      p.Score,
+            Rank:       i + 1,
+            UpdateTime: p.UpdateTime,
+        }
+    }
 
-    lb.cache.SetTopRanks(limit, result)
-    return result
+    lb.cache.SetTopRanks(limit, ranked)
+    return ranked
 }
 
 // GetNearbyRanks 获取临近排名 - O(log n + k)
 func (lb *HybridLeaderboard) GetNearbyRanks(playerID int64, rangeSize int) ([]*Player, error) {
-	lb.mu.RLock()
-	defer lb.mu.RUnlock()
+    lb.mu.RLock()
+    defer lb.mu.RUnlock()
 
-	rank, err := lb.GetPlayerRank(playerID)
-	if err != nil {
-		return nil, err
-	}
+    rank, err := lb.GetPlayerRank(playerID)
+    if err != nil {
+        return nil, err
+    }
 
-	start := max(1, rank-rangeSize)
-	end := min(lb.skipList.Length(), rank+rangeSize)
-
-	return lb.skipList.GetRange(start, end), nil
+    start := max(1, rank-rangeSize)
+    end := min(lb.skipList.Length(), rank+rangeSize)
+    original := lb.skipList.GetRange(start, end)
+    // 返回副本并填充 Rank，避免修改共享实体导致竞态
+    ranked := make([]*Player, len(original))
+    for i, p := range original {
+        ranked[i] = &Player{
+            ID:         p.ID,
+            Score:      p.Score,
+            Rank:       start + i,
+            UpdateTime: p.UpdateTime,
+        }
+    }
+    return ranked, nil
 }
 
 // GetPlayerCount 获取玩家数量 - O(1)

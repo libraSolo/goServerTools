@@ -1,11 +1,11 @@
 package api
 
 import (
-	"net/http"
-	"rank-system/storage"
-	"strconv"
+    "net/http"
+    "chart/storage"
+    "strconv"
 
-	"github.com/gin-gonic/gin"
+    "github.com/gin-gonic/gin"
 )
 
 // Handler HTTP请求处理器
