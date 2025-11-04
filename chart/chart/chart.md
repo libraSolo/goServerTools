@@ -23,11 +23,13 @@ chart/
 
 ## 架构概览
 ```
-Client -> Gin Router -> API Handler -> HybridLeaderboard
-                               ├── SkipList（精确排名）
-                               ├── TopPlayersHeap（前 K 快速读取）
-                               └── RankCache（TopN 短时缓存）
-Storage：MemoryRepository（示例，可扩展为 Redis/SQL 等）
+Client ──HTTP──▶ Gin Router ──▶ API Handler ──▶ HybridLeaderboard
+                                                ├─▶ SkipList（精确排名）
+                                                ├─▶ TopPlayersHeap（前 K 快速读取）
+                                                └─▶ RankCache（TopN 短时缓存）
+                                                                      │
+                                                                      ▼
+                                                              Storage（MemoryRepository / Redis / SQL …）
 ```
 
 ## 核心能力
@@ -70,6 +72,4 @@ Storage：MemoryRepository（示例，可扩展为 Redis/SQL 等）
 - 丰富查询接口（邻近排名、区间查询、分页 TopN）；
 - 分季/分片策略与多榜单管理；
 - 监控与指标（延迟、吞吐、缓存命中率）。
-
-以上文档已与当前代码结构对齐，便于快速理解与集成使用。
 
