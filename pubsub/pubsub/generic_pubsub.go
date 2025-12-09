@@ -108,11 +108,19 @@ func (ps *GenericPubSub[T]) Unsubscribe(subscriberID string, subject string) {
 		subs.subscribers.Remove(subscriberID)
 		if exactSet, ok := ps.subscriberExactSubjects[subscriberID]; ok {
 			exactSet.Remove(subject)
+			// 如果该订阅者没有任何订阅了，清理 handler
+			if len(exactSet) == 0 && len(ps.subscriberWildcardSubjects[subscriberID]) == 0 {
+				delete(ps.subscriberHandlers, subscriberID)
+			}
 		}
 	} else {
 		subs.wildcardSubscribers.Remove(subscriberID)
 		if wildcardSet, ok := ps.subscriberWildcardSubjects[subscriberID]; ok {
 			wildcardSet.Remove(subject)
+			// 如果该订阅者没有任何订阅了，清理 handler
+			if len(wildcardSet) == 0 && len(ps.subscriberExactSubjects[subscriberID]) == 0 {
+				delete(ps.subscriberHandlers, subscriberID)
+			}
 		}
 	}
 }
@@ -125,8 +133,11 @@ func (ps *GenericPubSub[T]) UnsubscribeAll(subscriberID string) {
 	if exactSet, ok := ps.subscriberExactSubjects[subscriberID]; ok {
 		delete(ps.subscriberExactSubjects, subscriberID)
 		for subject := range exactSet {
-			if subs := ps.getSubscribing(subject, false); subs != nil {
-				subs.subscribers.Remove(subscriberID)
+			// 使用 Find 而不是 Sub，避免创建不存在的节点
+			if node := ps.tree.Find(subject); node != nil {
+				if subs := ps.getSubscribingOfTree(node, false); subs != nil {
+					subs.subscribers.Remove(subscriberID)
+				}
 			}
 		}
 	}
@@ -134,49 +145,69 @@ func (ps *GenericPubSub[T]) UnsubscribeAll(subscriberID string) {
 	if wildcardSet, ok := ps.subscriberWildcardSubjects[subscriberID]; ok {
 		delete(ps.subscriberWildcardSubjects, subscriberID)
 		for subject := range wildcardSet {
-			if subs := ps.getSubscribing(subject, false); subs != nil {
-				subs.wildcardSubscribers.Remove(subscriberID)
+			// 使用 Find 而不是 Sub，避免创建不存在的节点
+			if node := ps.tree.Find(subject); node != nil {
+				if subs := ps.getSubscribingOfTree(node, false); subs != nil {
+					subs.wildcardSubscribers.Remove(subscriberID)
+				}
 			}
 		}
 	}
+
+	// 清理 handler，避免内存泄漏
+	delete(ps.subscriberHandlers, subscriberID)
 }
 
 // Publish 发布主题与内容，返回错误而不是 panic
 func (ps *GenericPubSub[T]) Publish(subject string, content T) error {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-
 	for _, c := range subject {
 		if c == '*' {
 			return fmt.Errorf("subject should not contain '*' while publishing")
 		}
 	}
 
-	ps.publishInTree(subject, content, &ps.tree, 0)
+	// 先收集所有需要调用的 handler（持有读锁）
+	ps.mu.RLock()
+	handlers := ps.collectHandlers(subject, &ps.tree, 0)
+	ps.mu.RUnlock()
+
+	// 释放锁后再调用 handler，避免阻塞其他操作
+	for _, h := range handlers {
+		h(subject, content)
+	}
 	return nil
 }
 
-// 递归发布
-func (ps *GenericPubSub[T]) publishInTree(subject string, content T, st *trietst.Trie, idx int) {
+// collectHandlers 递归收集所有需要调用的 handler
+func (ps *GenericPubSub[T]) collectHandlers(subject string, st *trietst.Trie, idx int) []Handler[T] {
+	var handlers []Handler[T]
+
+	// 收集通配订阅者
 	if subs := ps.getSubscribingOfTree(st, false); subs != nil {
 		for subscriberID := range subs.wildcardSubscribers {
 			if h, ok := ps.subscriberHandlers[subscriberID]; ok {
-				h(subject, content)
+				handlers = append(handlers, h)
 			}
 		}
 	}
 
 	if idx < len(subject) {
-		ps.publishInTree(subject, content, st.Child(subject[idx]), idx+1)
+		// 继续递归收集，使用 ChildIfExists 避免在读锁下创建节点
+		if nextNode := st.ChildIfExists(subject[idx]); nextNode != nil {
+			handlers = append(handlers, ps.collectHandlers(subject, nextNode, idx+1)...)
+		}
 	} else {
+		// 到达叶子节点，收集精确订阅者
 		if subs := ps.getSubscribingOfTree(st, false); subs != nil {
 			for subscriberID := range subs.subscribers {
 				if h, ok := ps.subscriberHandlers[subscriberID]; ok {
-					h(subject, content)
+					handlers = append(handlers, h)
 				}
 			}
 		}
 	}
+
+	return handlers
 }
 
 // 获取订阅集合
